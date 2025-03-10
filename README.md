@@ -9,11 +9,11 @@ The MCP Test Client has a dual role:
 - It's a **client** that connects to and tests other MCP servers
 
 ```
-┌─────────────┐          ┌─────────────────┐          ┌────────────────┐
-│             │  Tools   │                 │  Client   │                │
-│   Claude    │────────>│  MCP Test Client │────────>│  Server Under  │
-│             │          │                 │          │     Test       │
-└─────────────┘          └─────────────────┘          └────────────────┘
+┌─────────────┐          ┌───────────────────┐          ┌────────────────┐
+│             │  Tools   │                   │  Client  │                │
+│   Claude    │─────────>│  MCP Test Client  │─────────>│  Server Under  │
+│             │          │                   │          │     Test       │
+└─────────────┘          └───────────────────┘          └────────────────┘
 ```
 
 This architecture lets you test MCP servers without registering them directly with Claude.
