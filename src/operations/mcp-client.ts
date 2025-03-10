@@ -12,39 +12,100 @@ import {
   RunTestsResponse
 } from '../types/schemas.js';
 import { getServerProcess } from './docker.js';
+import EventSource from 'eventsource';
+import fetch from 'node-fetch';
 
 // Cache of connected clients by server name
 const connectedClients = new Map<string, Client>();
 
-// Create a custom Transport implementation for process communication
-class ProcessTransport implements Transport {
-  private messageBuffer = '';
+// Create a custom Transport implementation for SSE communication
+class SSETransport implements Transport {
+  private eventSource: EventSource | null = null;
+  private messageQueue: JSONRPCMessage[] = [];
+  private connected = false;
+  private serverUrl: string;
   
-  constructor(private server: ReturnType<typeof getServerProcess>) {}
+  constructor(serverName: string, serverUrl: string) {
+    this.serverUrl = serverUrl;
+    Logger.debug(`Creating SSE transport for server '${serverName}' at ${serverUrl}`);
+  }
   
   async start(): Promise<void> {
-    // Set up data handler for stdout
-    this.server.stdout.on('data', (data: Buffer) => {
-      this.handleData(data.toString());
-    });
-    
-    // Handle process exit
-    this.server.process.on('exit', (code) => {
-      Logger.warn(`Server process exited with code ${code}`);
-      if (this.onclose) {
-        this.onclose();
-      }
-    });
-    
-    return Promise.resolve();
+    try {
+      // Create an EventSource for SSE connections
+      this.eventSource = new EventSource(this.serverUrl);
+      Logger.debug(`Established SSE connection to ${this.serverUrl}`);
+      
+      // Set up event handlers
+      this.eventSource.onopen = () => {
+        Logger.debug('SSE connection opened');
+        this.connected = true;
+      };
+      
+      this.eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data) as JSONRPCMessage;
+          Logger.debug('Received SSE message:', data);
+          
+          if (this.onmessage) {
+            this.onmessage(data);
+          }
+        } catch (error) {
+          Logger.error('Error parsing SSE message:', error);
+          if (this.onerror && error instanceof Error) {
+            this.onerror(error);
+          }
+        }
+      };
+      
+      this.eventSource.onerror = (error) => {
+        Logger.error('SSE connection error:', error);
+        if (this.onerror) {
+          this.onerror(new Error('SSE connection error'));
+        }
+      };
+      
+      // Wait for connection to establish
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Timeout connecting to SSE server'));
+        }, 5000);
+        
+        this.eventSource!.onopen = () => {
+          clearTimeout(timeout);
+          this.connected = true;
+          resolve();
+        };
+      });
+    } catch (error) {
+      Logger.error('Error starting SSE transport:', error);
+      throw error;
+    }
   }
   
   async send(message: JSONRPCMessage): Promise<void> {
     try {
-      // Send message to server's stdin
-      this.server.stdin.write(JSON.stringify(message) + '\n');
+      if (!this.connected) {
+        throw new Error('SSE transport not connected');
+      }
+      
+      // Send message via fetch POST request to the server
+      const response = await fetch(this.serverUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(message)
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
+      }
+      
+      Logger.debug('Sent message to SSE server:', message);
       return Promise.resolve();
     } catch (error) {
+      Logger.error('Error sending message via SSE transport:', error);
       if (this.onerror && error instanceof Error) {
         this.onerror(error);
       }
@@ -53,41 +114,24 @@ class ProcessTransport implements Transport {
   }
   
   async close(): Promise<void> {
-    // Try to gracefully end the process
-    this.server.process.kill();
-    
-    if (this.onclose) {
-      this.onclose();
-    }
-    
-    return Promise.resolve();
-  }
-  
-  private handleData(data: string): void {
-    // Add data to buffer
-    this.messageBuffer += data;
-    
-    // Process complete messages
-    let messageEndIndex;
-    while ((messageEndIndex = this.messageBuffer.indexOf('\n')) !== -1) {
-      const messageStr = this.messageBuffer.slice(0, messageEndIndex);
-      this.messageBuffer = this.messageBuffer.slice(messageEndIndex + 1);
-      
-      if (messageStr.trim()) {
-        try {
-          const message = JSON.parse(messageStr) as JSONRPCMessage;
-          
-          // Call message handler if available
-          if (this.onmessage) {
-            this.onmessage(message);
-          }
-        } catch (error) {
-          Logger.error('Error parsing message:', error);
-          if (this.onerror && error instanceof Error) {
-            this.onerror(error);
-          }
-        }
+    try {
+      if (this.eventSource) {
+        this.eventSource.close();
+        this.eventSource = null;
+        this.connected = false;
       }
+      
+      if (this.onclose) {
+        this.onclose();
+      }
+      
+      return Promise.resolve();
+    } catch (error) {
+      Logger.error('Error closing SSE transport:', error);
+      if (this.onerror && error instanceof Error) {
+        this.onerror(error);
+      }
+      return Promise.reject(error);
     }
   }
   
@@ -95,6 +139,21 @@ class ProcessTransport implements Transport {
   onclose?: () => void;
   onerror?: (error: Error) => void;
   onmessage?: (message: JSONRPCMessage) => void;
+}
+
+// Get server details
+interface ServerDetail {
+  url: string;
+  name: string;
+}
+
+// Map of SSE server URLs by name
+const sseServers = new Map<string, ServerDetail>();
+
+// Register an SSE server
+export function registerSSEServer(name: string, url: string): void {
+  sseServers.set(name, { name, url });
+  Logger.info(`Registered SSE server '${name}' at ${url}`);
 }
 
 // Get or create a client for a server
@@ -105,11 +164,14 @@ async function getClient(serverName: string): Promise<Client> {
   }
   
   try {
-    // Get the server process
-    const server = getServerProcess(serverName);
+    // Check if we have server details
+    const serverDetail = sseServers.get(serverName);
+    if (!serverDetail) {
+      throw new ServerNotFoundError(serverName);
+    }
     
-    // Create transport for the server process
-    const transport = new ProcessTransport(server);
+    // Create transport for the SSE server
+    const transport = new SSETransport(serverName, serverDetail.url);
     
     // Create the client
     const client = new Client({
@@ -119,11 +181,9 @@ async function getClient(serverName: string): Promise<Client> {
     });
     
     // Connect to the server
-    Logger.debug(`Connecting to server '${serverName}'...`);
-    // The connect method requires a transport parameter in the MCP SDK
-    // But our Client constructor already has it, so we'll pass an empty object
+    Logger.debug(`Connecting to SSE server '${serverName}' at ${serverDetail.url}...`);
     await client.connect(transport);
-    Logger.debug(`Connected to server '${serverName}'`);
+    Logger.debug(`Connected to SSE server '${serverName}'`);
     
     // Cache the client for future use
     connectedClients.set(serverName, client);

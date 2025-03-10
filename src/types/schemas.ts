@@ -17,6 +17,20 @@ export type DeployServerResponse = {
   error?: string;
 };
 
+// SSE server registration schema
+export const RegisterSSEServerSchema = z.object({
+  name: z.string().describe("Name for the SSE server"),
+  url: z.string().url().describe("URL endpoint of the SSE server"),
+});
+
+export type RegisterSSEServerInput = z.infer<typeof RegisterSSEServerSchema>;
+export type RegisterSSEServerResponse = {
+  name: string;
+  url: string;
+  status: "registered" | "error";
+  error?: string;
+};
+
 // Tool call schema
 export const CallToolSchema = z.object({
   server_name: z.string().describe("Name of the deployed server to call"),

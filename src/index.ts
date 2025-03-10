@@ -8,10 +8,11 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { deployServer, listServers, getServerLogs, stopServer } from './operations/docker.js';
-import { callTool, runTests } from './operations/mcp-client.js';
+import { callTool, runTests, registerSSEServer } from './operations/mcp-client.js';
 
 import {
   DeployServerSchema,
+  RegisterSSEServerSchema,
   CallToolSchema,
   GetLogsSchema,
   ListServersSchema,
@@ -45,6 +46,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   
   return {
     tools: [
+      {
+        name: 'mcp_test_register_sse_server',
+        description: 'Register an external MCP server that uses SSE for communication',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { 
+              type: 'string',
+              description: 'Name for the SSE server'
+            },
+            url: { 
+              type: 'string',
+              description: 'URL endpoint of the SSE server'
+            }
+          },
+          required: ['name', 'url']
+        }
+      },
       {
         name: 'mcp_test_deploy_server',
         description: 'Deploy an MCP server to a test environment',
@@ -184,6 +203,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     let result;
     
     switch (name) {
+      case 'mcp_test_register_sse_server': {
+        const input = RegisterSSEServerSchema.parse(args);
+        registerSSEServer(input.name, input.url);
+        result = {
+          name: input.name,
+          url: input.url,
+          status: "registered"
+        };
+        break;
+      }
+      
       case 'mcp_test_deploy_server': {
         const input = DeployServerSchema.parse(args);
         result = await deployServer(input);

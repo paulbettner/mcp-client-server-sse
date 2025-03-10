@@ -2,7 +2,7 @@
 
 import readline from 'readline';
 import { deployServer, listServers, getServerLogs, stopServer } from './operations/docker.js';
-import { callTool, runTests } from './operations/mcp-client.js';
+import { callTool, runTests, registerSSEServer } from './operations/mcp-client.js';
 import { Logger } from './common/logger.js';
 
 // Initialize logger
@@ -18,12 +18,13 @@ const rl = readline.createInterface({
 function showMenu() {
   console.log('\n=== MCP Test Client CLI ===');
   console.log('1. Deploy server');
-  console.log('2. List servers');
-  console.log('3. Get server logs');
-  console.log('4. Stop server');
-  console.log('5. Call tool');
-  console.log('6. Run tests');
-  console.log('7. Exit');
+  console.log('2. Register SSE server');
+  console.log('3. List servers');
+  console.log('4. Get server logs');
+  console.log('5. Stop server');
+  console.log('6. Call tool');
+  console.log('7. Run tests');
+  console.log('8. Exit');
   rl.question('Select an option: ', handleMenuOption);
 }
 
@@ -35,21 +36,24 @@ async function handleMenuOption(option: string) {
         await handleDeployServer();
         break;
       case '2':
-        await handleListServers();
+        await handleRegisterSSEServer();
         break;
       case '3':
-        await handleGetLogs();
+        await handleListServers();
         break;
       case '4':
-        await handleStopServer();
+        await handleGetLogs();
         break;
       case '5':
-        await handleCallTool();
+        await handleStopServer();
         break;
       case '6':
-        await handleRunTests();
+        await handleCallTool();
         break;
       case '7':
+        await handleRunTests();
+        break;
+      case '8':
         rl.close();
         process.exit(0);
         break;
@@ -86,6 +90,24 @@ async function handleDeployServer() {
         
         showMenu();
       });
+    });
+  });
+}
+
+// Handle register SSE server
+async function handleRegisterSSEServer() {
+  rl.question('Server name: ', (name) => {
+    rl.question('Server URL: ', (url) => {
+      try {
+        registerSSEServer(name, url);
+        
+        console.log('SSE server registered successfully:');
+        console.log(JSON.stringify({ name, url, status: "registered" }, null, 2));
+      } catch (error) {
+        console.error('Error registering SSE server:', error);
+      }
+      
+      showMenu();
     });
   });
 }
