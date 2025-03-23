@@ -12,7 +12,11 @@ import {
   RunTestsResponse
 } from '../types/schemas.js';
 import { getServerProcess } from './docker.js';
-import EventSource from 'eventsource';
+// Import EventSource safely for both CommonJS and ESM environments
+// @ts-ignore - Bypassing TypeScript checks for eventsource import issues
+import * as EventSourceLib from 'eventsource';
+// @ts-ignore - Ensure we get a constructor regardless of module format
+const EventSourceConstructor = (EventSourceLib.default || EventSourceLib);
 import fetch from 'node-fetch';
 
 // Cache of connected clients by server name
@@ -20,92 +24,188 @@ const connectedClients = new Map<string, Client>();
 
 // Create a custom Transport implementation for SSE communication
 class SSETransport implements Transport {
-  private eventSource: EventSource | null = null;
+  private eventSource: any = null;
   private messageQueue: JSONRPCMessage[] = [];
   private connected = false;
   private serverUrl: string;
+  private serverName: string;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 3;
+  private reconnectDelay = 1000; // Start with 1 second
   
   constructor(serverName: string, serverUrl: string) {
     this.serverUrl = serverUrl;
+    this.serverName = serverName;
     Logger.debug(`Creating SSE transport for server '${serverName}' at ${serverUrl}`);
   }
   
   async start(): Promise<void> {
     try {
+      // Reset reconnection state
+      this.reconnectAttempts = 0;
+      
       // Create an EventSource for SSE connections
-      this.eventSource = new EventSource(this.serverUrl);
+      this.eventSource = new EventSourceConstructor(this.serverUrl, {
+        withCredentials: false, // Don't send cookies
+        https: { rejectUnauthorized: false } // Accept self-signed certs for local development
+      });
+      
       Logger.debug(`Established SSE connection to ${this.serverUrl}`);
       
       // Set up event handlers
-      this.eventSource.onopen = () => {
-        Logger.debug('SSE connection opened');
-        this.connected = true;
-      };
+      if (this.eventSource) {
+        this.eventSource.onopen = () => {
+          Logger.debug(`SSE connection opened to ${this.serverName}`);
+          this.connected = true;
+          this.reconnectAttempts = 0; // Reset counter on successful connection
+        };
       
-      this.eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data) as JSONRPCMessage;
-          Logger.debug('Received SSE message:', data);
+        this.eventSource.onmessage = (event: any) => {
+          try {
+            Logger.debug(`Received raw SSE message from ${this.serverName}:`, event.data);
+            
+            // Try to parse the message
+            let data: JSONRPCMessage;
+            try {
+              data = JSON.parse(event.data) as JSONRPCMessage;
+            } catch (parseError) {
+              // If parsing fails, check if this is a special message or not JSON
+              if (event.data.includes('connected')) {
+                Logger.debug(`Received connection confirmation from ${this.serverName}`);
+                return; // This is just a connection message, not a JSONRPC message
+              } else {
+                // Re-throw the error for general error handling
+                throw parseError;
+              }
+            }
+            
+            Logger.debug(`Parsed SSE message from ${this.serverName}:`, data);
+            
+            if (this.onmessage) {
+              this.onmessage(data);
+            }
+          } catch (error) {
+            Logger.error(`Error processing SSE message from ${this.serverName}:`, error);
+            if (this.onerror && error instanceof Error) {
+              this.onerror(error);
+            }
+          }
+        };
+      
+        this.eventSource.onerror = async (error: any) => {
+          Logger.error(`SSE connection error with ${this.serverName}:`, error);
           
-          if (this.onmessage) {
-            this.onmessage(data);
+          if (this.reconnectAttempts < this.maxReconnectAttempts) {
+            // Try to reconnect
+            this.reconnectAttempts++;
+            const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1); // Exponential backoff
+            
+            Logger.debug(`Attempting to reconnect to ${this.serverName} in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+            
+            // Close the current connection
+            if (this.eventSource) {
+              this.eventSource.close();
+              this.eventSource = null;
+            }
+            
+            // Wait before reconnecting
+            await new Promise(resolve => setTimeout(resolve, delay));
+            
+            // Try to reconnect
+            try {
+              await this.start();
+              Logger.debug(`Successfully reconnected to ${this.serverName}`);
+            } catch (reconnectError) {
+              Logger.error(`Failed to reconnect to ${this.serverName}:`, reconnectError);
+              
+              if (this.onerror) {
+                this.onerror(new Error(`Failed to reconnect to SSE server: ${reconnectError}`));
+              }
+            }
+          } else {
+            // Max reconnect attempts reached
+            this.connected = false;
+            
+            if (this.onerror) {
+              this.onerror(new Error(`SSE connection failed after ${this.maxReconnectAttempts} attempts`));
+            }
           }
-        } catch (error) {
-          Logger.error('Error parsing SSE message:', error);
-          if (this.onerror && error instanceof Error) {
-            this.onerror(error);
-          }
-        }
-      };
+        };
+      }
       
-      this.eventSource.onerror = (error) => {
-        Logger.error('SSE connection error:', error);
-        if (this.onerror) {
-          this.onerror(new Error('SSE connection error'));
-        }
-      };
-      
-      // Wait for connection to establish
+      // Wait for connection to establish with timeout
       return new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
-          reject(new Error('Timeout connecting to SSE server'));
+          reject(new Error(`Timeout connecting to SSE server ${this.serverName}`));
         }, 5000);
         
-        this.eventSource!.onopen = () => {
-          clearTimeout(timeout);
-          this.connected = true;
-          resolve();
-        };
+        if (this.eventSource) {
+          this.eventSource.onopen = () => {
+            clearTimeout(timeout);
+            this.connected = true;
+            resolve();
+          };
+        } else {
+          reject(new Error(`Failed to create EventSource for ${this.serverName}`));
+        }
       });
     } catch (error) {
-      Logger.error('Error starting SSE transport:', error);
+      Logger.error(`Error starting SSE transport for ${this.serverName}:`, error);
       throw error;
     }
   }
   
   async send(message: JSONRPCMessage): Promise<void> {
     try {
+      // Check if we're connected, if not try to reconnect
       if (!this.connected) {
-        throw new Error('SSE transport not connected');
+        Logger.debug(`SSE transport not connected for ${this.serverName}, attempting to reconnect...`);
+        try {
+          await this.start();
+          Logger.debug(`Reconnected to ${this.serverName}, proceeding with message send`);
+        } catch (reconnectError) {
+          throw new Error(`Failed to reconnect to SSE server: ${reconnectError}`);
+        }
       }
       
       // Send message via fetch POST request to the server
+      Logger.debug(`Sending message to ${this.serverName}:`, message);
+      
+      // Set up fetch with an AbortController for timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
       const response = await fetch(this.serverUrl, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
         },
-        body: JSON.stringify(message)
+        body: JSON.stringify(message),
+        signal: controller.signal
       });
       
+      // Clear the timeout
+      clearTimeout(timeoutId);
+      
       if (!response.ok) {
-        throw new Error(`HTTP error: ${response.status} ${response.statusText}`);
+        throw new Error(`HTTP error when sending to ${this.serverName}: ${response.status} ${response.statusText}`);
       }
       
-      Logger.debug('Sent message to SSE server:', message);
+      Logger.debug(`Successfully sent message to ${this.serverName}`);
       return Promise.resolve();
     } catch (error) {
-      Logger.error('Error sending message via SSE transport:', error);
+      Logger.error(`Error sending message to ${this.serverName}:`, error);
+      
+      // Mark as disconnected if it's a connection error
+      if (error instanceof Error && 
+          (error.message.includes('ECONNREFUSED') || 
+           error.message.includes('timeout') ||
+           error.message.includes('network') ||
+           error.message.includes('failed'))) {
+        this.connected = false;
+      }
+      
       if (this.onerror && error instanceof Error) {
         this.onerror(error);
       }
@@ -151,9 +251,71 @@ interface ServerDetail {
 const sseServers = new Map<string, ServerDetail>();
 
 // Register an SSE server
-export function registerSSEServer(name: string, url: string): void {
+export function registerSSEServer(name: string, url: string, force: boolean = false): void {
+  // If server was previously registered and force is false, just return
+  if (sseServers.has(name) && !force) {
+    Logger.info(`Server '${name}' already registered. Use force=true to re-register.`);
+    return;
+  }
+  
+  // If server was previously registered, clean up any existing client
+  if (sseServers.has(name)) {
+    Logger.debug(`Server '${name}' was previously registered, cleaning up...`);
+    
+    // Remove from SSE servers map
+    sseServers.delete(name);
+    
+    // If we have a connected client, close it
+    if (connectedClients.has(name)) {
+      const client = connectedClients.get(name);
+      if (client) {
+        try {
+          // Clean up any open connections
+          (client as any)._transport?.close?.();
+        } catch (error) {
+          // Ignore errors in cleanup
+          Logger.debug(`Error while cleaning up client for '${name}':`, error);
+        }
+      }
+      
+      // Remove from connected clients
+      connectedClients.delete(name);
+    }
+  }
+  
+  // Now register the server with the new URL
   sseServers.set(name, { name, url });
   Logger.info(`Registered SSE server '${name}' at ${url}`);
+}
+
+// Unregister a server to force reconnection on next use
+export function unregisterSSEServer(name: string): void {
+  // Check if the server is registered
+  if (!sseServers.has(name)) {
+    Logger.warn(`No SSE server registered with name '${name}'`);
+    return;
+  }
+  
+  // If we have a connected client, close it
+  if (connectedClients.has(name)) {
+    const client = connectedClients.get(name);
+    if (client) {
+      try {
+        // Clean up any open connections
+        (client as any)._transport?.close?.();
+      } catch (error) {
+        // Ignore errors in cleanup
+        Logger.debug(`Error while cleaning up client for '${name}':`, error);
+      }
+    }
+    
+    // Remove from connected clients
+    connectedClients.delete(name);
+  }
+  
+  // Remove from SSE servers map
+  sseServers.delete(name);
+  Logger.info(`Unregistered SSE server '${name}'`);
 }
 
 // Get or create a client for a server
@@ -205,8 +367,39 @@ export async function callTool(input: CallToolInput): Promise<CallToolResponse> 
   const startTime = Date.now();
   
   try {
-    // Get client for this server
-    const client = await getClient(server_name);
+    // First, check if we have a cached client
+    let client: Client;
+    if (connectedClients.has(server_name)) {
+      // We have a cached client, but let's verify it's still connected
+      client = connectedClients.get(server_name)!;
+      
+      // Perform a quick health check - if it fails, we'll create a new client
+      try {
+        Logger.debug(`Verifying cached connection to server '${server_name}'`);
+        
+        // Set up fetch with an AbortController for timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 1000);
+        
+        await fetch(sseServers.get(server_name)?.url || '', { 
+          method: 'HEAD',
+          signal: controller.signal
+        });
+        
+        // Clear the timeout
+        clearTimeout(timeoutId);
+      } catch (error) {
+        // Connection appears to be broken, remove it from cache
+        Logger.debug(`Cached connection to server '${server_name}' is broken, will reconnect`);
+        connectedClients.delete(server_name);
+        
+        // Get a fresh client
+        client = await getClient(server_name);
+      }
+    } else {
+      // No cached client, create a new one
+      client = await getClient(server_name);
+    }
     
     // Call the tool
     Logger.debug(`Calling tool '${tool_name}' on server '${server_name}'`, args);
@@ -243,6 +436,16 @@ export async function callTool(input: CallToolInput): Promise<CallToolResponse> 
   } catch (error) {
     const duration = Date.now() - startTime;
     Logger.error(`Error calling tool '${tool_name}' on server '${server_name}':`, error);
+    
+    // If the error suggests the server is down or inaccessible,
+    // remove it from the cache to force a reconnection on next attempt
+    if (error instanceof Error && 
+        (error.message.includes('ECONNREFUSED') ||
+         error.message.includes('timeout') ||
+         error.message.includes('not connected'))) {
+      Logger.debug(`Removing cached connection to server '${server_name}' due to connectivity error`);
+      connectedClients.delete(server_name);
+    }
     
     return {
       result: null,

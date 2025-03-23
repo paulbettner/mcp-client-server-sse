@@ -6,13 +6,17 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 import { deployServer, listServers, getServerLogs, stopServer } from './operations/docker.js';
-import { callTool, runTests, registerSSEServer } from './operations/mcp-client.js';
+import { callTool, runTests, registerSSEServer, unregisterSSEServer } from './operations/mcp-client.js';
 
 import {
   DeployServerSchema,
   RegisterSSEServerSchema,
+  UnregisterSSEServerSchema,
   CallToolSchema,
   GetLogsSchema,
   ListServersSchema,
@@ -23,6 +27,74 @@ import {
 import { VERSION } from './common/version.js';
 import { Logger } from './common/logger.js';
 import { MCPTestError } from './common/errors.js';
+
+// Lock file path for single instance check
+const LOCK_FILE_PATH = path.join(os.tmpdir(), 'mcp-client-server.lock');
+
+// Check for other running instances
+function checkExistingInstance() {
+  try {
+    if (fs.existsSync(LOCK_FILE_PATH)) {
+      const lockData = fs.readFileSync(LOCK_FILE_PATH, 'utf8');
+      const { pid, startTime } = JSON.parse(lockData);
+      
+      // Check if process with this PID exists
+      try {
+        // On POSIX systems, sending signal 0 checks existence without sending a signal
+        process.kill(pid, 0);
+        
+        Logger.error(`Another MCP client server is already running (PID: ${pid})`);
+        Logger.error(`If you're sure no other server is running, delete the lock file: ${LOCK_FILE_PATH}`);
+        process.exit(1);
+      } catch (e) {
+        // Process doesn't exist, we can take over the lock
+        Logger.warn(`Found stale lock file from process ${pid}. Taking over.`);
+      }
+    }
+    
+    // Write our lock file
+    const lockData = JSON.stringify({
+      pid: process.pid,
+      startTime: new Date().toISOString(),
+      hostname: os.hostname()
+    });
+    
+    fs.writeFileSync(LOCK_FILE_PATH, lockData);
+    
+    // Register cleanup on exit
+    const cleanupLock = () => {
+      try {
+        if (fs.existsSync(LOCK_FILE_PATH)) {
+          const lockData = fs.readFileSync(LOCK_FILE_PATH, 'utf8');
+          const { pid } = JSON.parse(lockData);
+          
+          // Only delete if it's our lock
+          if (pid === process.pid) {
+            fs.unlinkSync(LOCK_FILE_PATH);
+            Logger.debug(`Removed lock file: ${LOCK_FILE_PATH}`);
+          }
+        }
+      } catch (err) {
+        Logger.error(`Error cleaning up lock file: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    
+    process.on('exit', cleanupLock);
+    process.on('SIGINT', () => {
+      cleanupLock();
+      process.exit(0);
+    });
+    process.on('SIGTERM', () => {
+      cleanupLock();
+      process.exit(0);
+    });
+    
+    return true;
+  } catch (err) {
+    Logger.error(`Error checking for existing instances: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
 
 // Initialize logger
 Logger.init();
@@ -59,9 +131,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             url: { 
               type: 'string',
               description: 'URL endpoint of the SSE server'
+            },
+            force: {
+              type: 'boolean',
+              description: 'Force re-registration even if already registered',
+              default: true
             }
           },
           required: ['name', 'url']
+        }
+      },
+      {
+        name: 'mcp_test_unregister_sse_server',
+        description: 'Unregister a previously registered SSE server to force reconnection',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { 
+              type: 'string',
+              description: 'Name of the SSE server to unregister'
+            }
+          },
+          required: ['name']
         }
       },
       {
@@ -205,11 +296,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case 'mcp_test_register_sse_server': {
         const input = RegisterSSEServerSchema.parse(args);
-        registerSSEServer(input.name, input.url);
+        registerSSEServer(input.name, input.url, input.force);
         result = {
           name: input.name,
           url: input.url,
           status: "registered"
+        };
+        break;
+      }
+      
+      case 'mcp_test_unregister_sse_server': {
+        const input = UnregisterSSEServerSchema.parse(args);
+        unregisterSSEServer(input.name);
+        result = {
+          name: input.name,
+          status: "unregistered"
         };
         break;
       }
@@ -288,6 +389,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   try {
     Logger.info('Starting MCP Test Client...');
+    
+    // Check for existing instances
+    if (!checkExistingInstance()) {
+      Logger.error('Failed to initialize due to instance check failure');
+      process.exit(1);
+    }
+    
+    Logger.info(`MCP client server started with PID ${process.pid}`);
     
     const transport = new StdioServerTransport();
     await server.connect(transport);
