@@ -1,277 +1,327 @@
-# MCP Client Server SSE Repository Guide
+# MCP Client Server Guide
 
 ## Overview
-This package provides an SSE-compatible client for Model Context Protocol (MCP) servers, allowing communication via Server-Sent Events. It extends the standard MCP client to support real-time event streaming between client and server.
+This package provides a client for testing and integrating with Model Context Protocol (MCP) servers. It supports both stdio and SSE (Server-Sent Events) communication methods, with thorough implementation of the MCP protocol specification.
+
+## What is the Model Context Protocol (MCP)?
+
+MCP is a standardized protocol that allows LLMs (Large Language Models) to interact with external servers to:
+- Call tools (functions)
+- Access resources (file-like data)
+- Use predefined prompts
+
+The protocol follows a JSON-RPC 2.0 message format and supports various transport methods, including stdio and SSE.
 
 ## Build & Test Commands
 - Build: `npm run build` - Compiles TypeScript to JavaScript
 - Start: `npm run start` - Starts the client server
 - Development: `npm run dev` - Runs in development mode with TypeScript
-- Run tests: `npm run test` - Executes the test runner
-- Run specific test: `LOG_LEVEL=DEBUG npm run test <test-suite-name>`
-- Register SSE server: Use menu option 2 in the CLI or call `registerSSEServer('name', 'url')`
+- Register SSE server: `mcp__mcp-test__mcp_test_register_sse_server --name="server-name" --url="http://localhost:PORT" --force=true`
 
 ## Key Features
 - SSE (Server-Sent Events) support for real-time communication
 - Custom transport layer for the MCP protocol
-- Test runner for validating MCP servers
+- Test framework for validating MCP servers
 - Docker integration for managing server instances
 
 ## Code Structure
 - `src/operations/` - Core operation modules including MCP client and Docker management
 - `src/common/` - Shared utilities, logging, and error handling
 - `src/types/` - TypeScript type definitions and schema validation
-- `test/` - Test suites and test case definitions
 
-## Code Style Guidelines
-- **TypeScript**: Use strict typing with proper interfaces/types
-- **Module System**: ES modules with `.js` extension for local imports
-- **Import Handling**:
-  - For CommonJS modules, use:
-    ```typescript
-    import * as LibName from 'lib-name';
-    const SomeExport = LibName.default || LibName;
-    ```
-  - For ESM modules, use standard imports with named exports where possible
-- **Error Handling**: Extend base MCPTestError class for domain-specific errors
-- **Naming Conventions**: 
-  - camelCase for variables and functions
-  - PascalCase for classes and types
-  - ALL_CAPS for constants
-- **Logging**: Use Logger class with appropriate log levels (DEBUG, INFO, WARN, ERROR)
-- **Async Pattern**: Use async/await for asynchronous operations
-- **Testing**: Each tool should have corresponding test cases
+## MCP Test Tools
 
-## Integration with Smarty Pants Monorepo
-- This package follows the conventions of the Smarty Pants monorepo
-- Uses the shared TypeScript configuration for consistency
-- Leverages monorepo's dependencies where possible
-- Can be built and tested via the top-level monorepo commands
+The MCP test tools provide a comprehensive way to test MCP servers:
 
-## SSE Transport Implementation
-The SSE transport layer implements the MCP Transport interface to:
-1. Establish an EventSource connection for receiving events
-2. Send messages via HTTP POST requests
-3. Handle reconnection and error scenarios
-4. Parse and dispatch JSON-RPC messages
+```bash
+# Deploy a server for testing
+mcp__mcp-test__mcp_test_deploy_server --name="server-name" --source_path="/path/to/server" --env_vars='{"ENV_VAR":"value"}'  
 
-## Development Notes
-- Make sure to run `npm run build` after code changes and before testing
-- Use environment variable `LOG_LEVEL=DEBUG` for detailed logging
-- Test with a real MCP server for full integration testing
+# For SSE servers, register server
+mcp__mcp-test__mcp_test_register_sse_server --name="server-name" --url="http://localhost:3334" --force=true
 
-## SSE Resilience Improvements (2025-03-23)
+# Call a tool on the server
+mcp__mcp-test__mcp_test_call_tool --server_name="server-name" --tool_name="tool-name" --arguments='{"param":"value"}'  
 
-We made several improvements to make the MCP client server more resilient when working with SSE servers, especially when those servers restart. These changes help with the development workflow where an MCP server is modified, rebuilt, and restarted.
+# Get server logs
+mcp__mcp-test__mcp_test_get_logs --server_name="server-name" --lines=100
 
-### Changes Made:
+# List deployed servers
+mcp__mcp-test__mcp_test_list_servers
 
-1. **Enhanced SSE Transport**:
-   - Added automatic reconnection logic with exponential backoff
-   - Added proper error handling for connection failures
-   - Added better logging of connection states
-   - Fixed event parsing to handle special messages
+# Stop a server
+mcp__mcp-test__mcp_test_stop_server --server_name="server-name"  
 
-2. **Improved Connection Management**:
-   - Added connection health checks before using cached connections
-   - Added cleanup of stale connections
-   - Added proper timeouts using AbortController
-   - Fixed error handling to properly close dead connections
+# Unregister SSE server
+mcp__mcp-test__mcp_test_unregister_sse_server --name="server-name"
+```
 
-3. **Added Server Registration Management**:
-   - Enhanced `registerSSEServer` to clean up existing connections
-   - Added `unregisterSSEServer` to force reconnection
-   - Added a new tool `mcp_test_unregister_sse_server`
-   - Added a `force` flag to the registration tool
+## Understanding the MCP Protocol
 
-4. **Error Recovery**:
-   - Improved error detection and recovery in the client code
-   - Added connection state tracking
-   - Enhanced error messages with server names
+### MCP Communication Flow
 
-### How to Use with Development Workflow:
+1. **Connection Establishment**:
+   - For stdio: Connection is established via stdin/stdout pipes
+   - For SSE (Server-Sent Events):
+     - Client connects to server via GET request to an endpoint (typically "/")
+     - Server responds with SSE headers and begins streaming events
+     - Server sends an "endpoint" event with URL where client should POST messages
+     - This URL includes a query parameter for session ID: `/?sessionId=xyz123`
 
-1. **After Server Changes**:
-   When you modify and restart an MCP server, you should:
-   
+2. **Initialization**:
+   - Client sends an `initialize` method with protocol version and capabilities
+   - Server responds with its capabilities and supported features
+
+3. **Tool Discovery**:
+   - Client can request a list of available tools via `tools/list`
+   - Server responds with tool names, descriptions, and parameter schemas
+
+4. **Tool Invocation**:
+   - Client sends a `tools/call` method with tool name and arguments
+   - Server validates arguments (typically using Zod schemas)
+   - Server executes the tool and returns the result
+   - Results contain structured content (text, images, etc.)
+
+5. **Error Handling**:
+   - All errors follow the JSON-RPC 2.0 error format
+   - Client can implement reconnection logic for dropped connections
+
+### The MCP Session Lifecycle
+
+When working with SSE-based MCP servers, understanding the session lifecycle is crucial:
+
+1. **Session Creation**:
+   - When a client makes a GET request, the server:
+     - Creates a new SSEServerTransport instance
+     - Generates a unique session ID (accessible via `transport.sessionId`)
+     - Sends an "endpoint" event with this session ID
+     - Stores the transport mapped to this session ID
+
+2. **Client Communication**:
+   - Client receives the endpoint URL with the session ID
+   - All subsequent POST requests include this session ID as a query parameter
+   - Server uses this ID to look up the corresponding transport
+
+3. **Session Termination**:
+   - When the connection closes (client disconnects or server stops)
+   - Server detects the close event and removes the transport from its map
+   - Any resources associated with the session are cleaned up
+
+## SSE Implementation Details
+
+The SSE implementation in the MCP protocol has several important characteristics:
+
+1. **Client-side SSE Transport**:
+   - Uses the browser's native EventSource API or a polyfill
+   - Connects to the server via GET request
+   - Listens for specific event types: "message", "endpoint", etc.
+   - Sends JSON-RPC requests via POST to the endpoint URL
+
+2. **Server-side SSE Transport**:
+   - Extends Express or similar HTTP framework
+   - GET endpoint for establishing SSE connections
+   - POST endpoint for receiving client messages
+   - Maps session IDs to transport instances
+   - Uses the official MCP SDK's `SSEServerTransport` class
+
+3. **SSE Connection Flow**:
+   - Client -> Server: GET request to establish SSE connection
+   - Server -> Client: SSE headers and "endpoint" event
+   - Client -> Server: POST requests to endpoint with session ID
+   - Server -> Client: SSE events with JSON-RPC responses
+
+## Debugging SSE-based MCP Servers
+
+### Common Issues and Solutions
+
+#### Connection Problems
+
+1. **Client can't connect to server**
+   - **Issue**: GET request fails or connection drops immediately
+   - **Check**: Is server running? Correct port? No CORS issues?
+   - **Solution**: Use `curl -N http://localhost:PORT` to test direct connection
+
+2. **404 Not Found errors**
+   - **Issue**: POST requests can't find the right endpoint
+   - **Check**: Is the endpoint URL correct? Does it include session ID?
+   - **Solution**: Check server logs for the actual endpoint path
+
+#### Session ID Issues
+
+1. **Transport not found errors**
+   - **Issue**: Server can't find a transport for the session ID
+   - **Check**: Are session IDs being properly tracked?
+   - **Solution**: Log session IDs on both client and server
+
+2. **Multiple clients confusion**
+   - **Issue**: Sessions getting mixed up or overwritten
+   - **Check**: How are transports stored? Map implementation?
+   - **Solution**: Use a proper session ID storage mechanism
+
+#### Message Processing Problems
+
+1. **Messages not being processed**
+   - **Issue**: Client sends messages but server doesn't respond
+   - **Check**: Is `handlePostMessage` being called correctly?
+   - **Solution**: Add verbose logging for request bodies and processing
+
+2. **Tool invocation errors**
+   - **Issue**: Tool call fails with validation or execution errors
+   - **Check**: Correct arguments? Tool implementation sound?
+   - **Solution**: Test tools directly with the test client
+
+### Complete SSE Debugging Workflow
+
+When troubleshooting SSE-based MCP servers:
+
+1. **Deploy with Environment Variables**:
    ```bash
-   # After modifying server code and restarting it:
-   npm run tool -- mcp__mcp-test__mcp_test_unregister_sse_server --name=server-name
-   npm run tool -- mcp__mcp-test__mcp_test_register_sse_server --name=server-name --url=http://localhost:PORT
+   mcp__mcp-test__mcp_test_deploy_server --name="sse-server" --source_path="/path/to/server" --env_vars='{"MCP_TRANSPORT_TYPE":"sse","MCP_PORT":"3334"}'
    ```
 
-2. **Full Reset**:
-   If the server doesn't reconnect properly, you may need to restart the MCP client server:
-   
+2. **Force New Registration**:
    ```bash
-   # Find and kill the MCP client server
+   mcp__mcp-test__mcp_test_unregister_sse_server --name="sse-server"
+   mcp__mcp-test__mcp_test_register_sse_server --name="sse-server" --url="http://localhost:3334" --force=true
+   ```
+
+3. **Check for Server Listening**:
+   ```bash
+   lsof -i :3334
+   curl -N http://localhost:3334  # Should maintain an open connection
+   ```
+
+4. **Examine Detailed Logs**:
+   ```bash
+   mcp__mcp-test__mcp_test_get_logs --server_name="sse-server" --lines=100
+   ```
+
+5. **Test Simple Tools First**:
+   - Start with an "echo" tool that just returns the input
+   - Then progress to more complex tools
+   ```bash
+   mcp__mcp-test__mcp_test_call_tool --server_name="sse-server" --tool_name="echo" --arguments='{"message":"test"}'
+   ```
+
+6. **Inspect Network Communication**:
+   - Use browser DevTools Network tab (for web clients)
+   - Or use a proxy like mitmproxy to see request/response details
+
+7. **Try Single-Client Mode**:
+   - For debugging, simplify to a single active transport
+   - Add fallback logic for missing session IDs (in development only)
+
+## Server Reset Procedure
+
+If you need to completely reset the environment:
+
+1. **Stop All MCP Servers**:
+   ```bash
+   mcp__mcp-test__mcp_test_list_servers | jq -r '.servers[].name' | xargs -I {} mcp__mcp-test__mcp_test_stop_server --server_name="{}"
+   ```
+
+2. **Kill the Client Server Process**:
+   ```bash
    pkill -f "node.*mcp-client-server/dist"
-   
-   # Restart it
+   ```
+
+3. **Restart Client Server**:
+   ```bash
    cd /Users/paulbettner/Projects/smarty-pants
-   node packages/mcp-client-server/dist/index.js &
+   node packages/mcp-client-server/dist/index.js > mcp-client.log 2>&1 &
    ```
 
-   **IMPORTANT**: When restarting the MCP client server, you must also restart your Claude Code session afterward. This is because:
-   
-   1. The Claude Code session is connected to the MCP client server process
-   2. If you kill and restart that process, your current Claude Code session loses its connection
-   3. The correct workflow is:
-      - Document your current progress in CLAUDE.md
-      - Kill the existing MCP client server processes (`pkill -f "node.*mcp-client-server/dist"`)
-      - Exit the current Claude Code session
-      - Start a new Claude Code session, which will automatically start a fresh MCP client server
-      - Continue your work from where you left off
-
-### Current Progress (2025-03-24)
-
-We made the following changes to test the MCP client server's SSE reconnection capabilities:
-
-1. Reviewed the latest SSE resilience improvements from 2025-03-23
-2. Added a new "power" operation to the calculator server
-3. Modified the calculator server to include validation for negative fractional exponents
-4. Enhanced the power operation validation to handle additional edge cases:
-   - Preventing raising zero to a negative power
-   - Preventing raising negative numbers to non-integer powers
-5. Updated the operation description to include the "power" operation
-6. Built the calculator server with the updated validation logic
-
-### Issues Encountered
-
-We encountered several issues:
-1. Multiple MCP client server instances were running simultaneously
-2. The MCP client server wasn't properly connected to enable SSE connections
-3. When trying to use the MCP test tools, we received "Not connected" errors
-4. We terminated all running MCP client server instances to prepare for a clean restart
-
-### Next Steps (For Fresh AI Session)
-
-1. The MCP client server will be automatically started when a new Claude Code session begins
+4. **Check for Orphaned Processes**:
    ```bash
-   # We've already killed the existing MCP client server processes:
-   pkill -f "node.*mcp-client-server/dist"
-   
-   # No need to manually start the server - Claude Code will automatically
-   # start the MCP client server when a new session begins
+   lsof -i :3334  # Check if anything is still using your port
    ```
 
-2. Deploy the calculator server:
-   ```bash
-   # Build and deploy the calculator server
-   cd /Users/paulbettner/Projects/smarty-pants
-   
-   # Use the MCP test deploy tool
-   npm run tool -- mcp__mcp-test__mcp_test_deploy_server --name=calculator-server --source_path="/Users/paulbettner/Projects/smarty-pants/packages/mcp-servers/deployed/calculator-server"
-   ```
+## JSON-RPC Message Reference
 
-3. Register the server:
-   ```bash
-   # Register the SSE server
-   npm run tool -- mcp__mcp-test__mcp_test_register_sse_server --name=calculator-server --url=http://localhost:3334 --force=true
-   ```
+All MCP protocol communication uses JSON-RPC 2.0 format:
 
-4. Test regular operations:
-   ```bash
-   # Test addition
-   npm run tool -- mcp__mcp-test__mcp_test_call_tool --server_name=calculator-server --tool_name=calculate --arguments='{"operation":"add","a":5,"b":3}'
-   
-   # Test power operation
-   npm run tool -- mcp__mcp-test__mcp_test_call_tool --server_name=calculator-server --tool_name=calculate --arguments='{"operation":"power","a":2,"b":3}'
-   ```
+```javascript
+// Initialize request
+{
+  "jsonrpc": "2.0",
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": {
+      "name": "client-name",
+      "version": "1.0.0"
+    }
+  },
+  "id": 0
+}
 
-5. Make a small change to the calculator server and test reconnection:
-   ```bash
-   # Update the calculator server source code (e.g., modify validation logic)
-   
-   # Rebuild the server
-   cd /Users/paulbettner/Projects/smarty-pants/packages/mcp-servers/deployed/calculator-server
-   tsc
-   
-   # Stop and restart the deployed server
-   npm run tool -- mcp__mcp-test__mcp_test_stop_server --server_name=calculator-server
-   npm run tool -- mcp__mcp-test__mcp_test_deploy_server --name=calculator-server --source_path="/Users/paulbettner/Projects/smarty-pants/packages/mcp-servers/deployed/calculator-server"
-   
-   # Use the unregister tool to force reconnection
-   npm run tool -- mcp__mcp-test__mcp_test_unregister_sse_server --name=calculator-server
-   
-   # Register again
-   npm run tool -- mcp__mcp-test__mcp_test_register_sse_server --name=calculator-server --url=http://localhost:3334 --force=true
-   
-   # Test to see if the updated server is reached
-   npm run tool -- mcp__mcp-test__mcp_test_call_tool --server_name=calculator-server --tool_name=calculate --arguments='{"operation":"power","a":2,"b":-1.5}'
-   ```
+// Tool call request
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "tool-name",
+    "arguments": {
+      "param1": "value1",
+      "param2": 42
+    }
+  },
+  "id": 1
+}
 
-6. Check the logs:
-   ```bash
-   # Get calculator server logs
-   npm run tool -- mcp__mcp-test__mcp_test_get_logs --server_name=calculator-server --lines=20
-   
-   # Check MCP client server logs
-   tail -n 30 mcp-client.log
-   ```
+// Successful response
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      { 
+        "type": "text", 
+        "text": "Result content here" 
+      }
+    ]
+  },
+  "id": 1
+}
 
-The key test is to verify that after stopping, redeploying, unregistering, and re-registering the calculator server, the MCP client server can properly connect to the updated server and the updated validation logic takes effect, without needing to restart the MCP client server process itself.
+// Error response
+{
+  "jsonrpc": "2.0",
+  "error": {
+    "code": -32602,
+    "message": "Invalid params: Parameter validation failed"
+  },
+  "id": 1
+}
+```
 
-These improvements should make the MCP test tool much more resilient to server restarts and changes, allowing for a smoother development workflow when working with MCP servers.
+## Testing with the Simple SSE Server
 
-### Issue Discovery: Multiple MCP Client Servers (2025-03-24)
+We've created a minimal reference implementation in `packages/mcp-servers/development/simple-sse-server` that demonstrates proper MCP over SSE. To use it for testing:
 
-During testing of schema updates through the MCP client server, we encountered a critical issue: multiple MCP client server processes were running simultaneously, causing schema caching inconsistencies.
+```bash
+# Deploy the server
+mcp__mcp-test__mcp_test_deploy_server --name="simple-sse" --source_path="/Users/paulbettner/Projects/smarty-pants/packages/mcp-servers/development/simple-sse-server" --env_vars='{"MCP_TRANSPORT_TYPE":"sse","MCP_PORT":"3335"}'
 
-#### Problem Details:
-1. When attempting to add a new "modulo" operation to the calculator server, the schema wasn't properly refreshed
-2. Investigation revealed multiple MCP client server instances running:
-   ```bash
-   # Output of: ps aux | grep mcp-client-server | grep -v grep
-   paulbettner 89286 0.0 0.1 428315808 74384 s002 TN 12:11AM 0:00.18 node packages/mcp-client-server/dist/index.js
-   paulbettner 86368 0.0 0.1 428296096 76960 s002 TN 11:43PM 0:00.12 node packages/mcp-client-server/dist/index.js
-   ```
-3. Even after following all proper procedures (stop server, rebuild, redeploy, unregister, re-register), schema changes weren't recognized
-4. The presence of multiple MCP client server processes may lead to inconsistent caching behavior
+# Register with the client
+mcp__mcp-test__mcp_test_register_sse_server --name="simple-sse" --url="http://localhost:3335" --force=true
 
-#### Implemented Solutions (2025-03-24):
-1. Added a lock file mechanism to prevent multiple MCP client server instances:
-   - Lock file is created at system temp directory `os.tmpdir()` with PID info
-   - On server start, it checks for existing lock file and verifies if process is running
-   - If a valid process is running, the new instance exits with clear error message
-   - If a stale lock exists, it's replaced with the new process information
-   - Lock file is automatically cleaned up on process exit with signal handlers
+# Test the echo tool
+mcp__mcp-test__mcp_test_call_tool --server_name="simple-sse" --tool_name="echo" --arguments='{"message":"Hello, MCP!"}'
 
-2. Enhanced the registerSSEServer function:
-   - Added proper force parameter handling in accordance with schema
-   - Now respects the force=false option and avoids unnecessary reconnections
-   - Properly passes force parameter from the API call to the function
+# Test the add tool
+mcp__mcp-test__mcp_test_call_tool --server_name="simple-sse" --tool_name="add" --arguments='{"a":5,"b":7}'
+```
 
-3. Built and tested the changes:
-   - Verified the schema already included force parameter
-   - Built the project successfully
-   - Each run of the MCP client server successfully creates/cleans up its lock file
+## Best Practices
 
-#### Restart Procedure
-When working with MCP servers, follow this procedure if you need to restart the MCP client server:
-
-1. Kill any running MCP client server processes:
-   ```bash
-   pkill -f "node.*mcp-client-server/dist"
-   ```
-
-2. Restart the server:
-   ```bash
-   cd /Users/paulbettner/Projects/smarty-pants/packages/mcp-client-server
-   node dist/index.js > mcp-client.log 2>&1 &
-   ```
-
-3. After restarting, the server automatically checks for and cleans up any stale lock files.
-
-#### Remaining Tasks for Future Improvement:
-1. Add monitoring features to track MCP client server health
-2. Implement explicit schema versioning to force cache invalidation on schema changes
-3. Add more detailed logging around connection and disconnection events
-
-#### Benefits:
-- The MCP client server now prevents multiple instances from running simultaneously
-- Force parameter support allows for more controlled reconnection behavior
-- Proper cleanup of resources on server shutdown
-- Robust PID checking prevents lock file issues with stale processes
-
-These changes make the MCP client server more robust against the multiple instance issues that were causing schema caching problems.
+1. **Force Registration**: Always use the `--force=true` flag when registering SSE servers during development
+2. **Verbose Logging**: Add detailed logging on both client and server sides
+3. **Port Management**: Be aware of port conflicts and use environment variables to configure ports
+4. **Simple-to-Complex**: Start with simple tools like "echo" before implementing complex ones
+5. **Session Tracking**: Implement proper session ID tracking and cleanup
+6. **Error Handling**: Follow JSON-RPC error format for all error responses
+7. **Testing**: Use MCP test tools to validate your server implementation
+8. **SDK Compatibility**: Use the official MCP SDK classes (`McpServer`, `SSEServerTransport`, etc.)
+9. **Protocol Compliance**: Follow the MCP specification for all message formats and events
+10. **Documentation**: Maintain clear documentation of your server's tools and capabilities
