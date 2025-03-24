@@ -12,3 +12,5 @@ wheels/
 # Node-generated files
 dist/
 node_modules/
+# Log files
+*.log
