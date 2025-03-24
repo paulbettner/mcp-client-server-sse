@@ -21,6 +21,7 @@ export type DeployServerResponse = {
 export const RegisterSSEServerSchema = z.object({
   name: z.string().describe("Name for the SSE server"),
   url: z.string().url().describe("URL endpoint of the SSE server"),
+  force: z.boolean().optional().default(true).describe("Force re-registration even if already registered"),
 });
 
 export type RegisterSSEServerInput = z.infer<typeof RegisterSSEServerSchema>;
@@ -28,6 +29,18 @@ export type RegisterSSEServerResponse = {
   name: string;
   url: string;
   status: "registered" | "error";
+  error?: string;
+};
+
+// SSE server unregistration schema
+export const UnregisterSSEServerSchema = z.object({
+  name: z.string().describe("Name of the SSE server to unregister"),
+});
+
+export type UnregisterSSEServerInput = z.infer<typeof UnregisterSSEServerSchema>;
+export type UnregisterSSEServerResponse = {
+  name: string;
+  status: "unregistered" | "error";
   error?: string;
 };
 
